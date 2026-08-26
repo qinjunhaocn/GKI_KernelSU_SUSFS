@@ -129,7 +129,18 @@ jobs:
       - name: Generate kernel config
         run: |
           cd kernel
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 mgk_64_k510_defconfig oplus6895.config
+          mkdir -p out
+          # 基础必须用 gki_defconfig(含 CONFIG_CGROUPS/CGROUP_SCHED/CPUSETS 等 Android 基础 config).
+          # mgk_64_k510_defconfig 仅 948 行, 是精简 fragment, 单独当 base 会使 CONFIG_CGROUPS 默认 n,
+          # 导致 include/trace/events/sched.h 中 oplus 的 cgroup id 代码(task_css_set /
+          # cpu_cgrp_id / cpuset_cgrp_id)全部不可见, 编译报错. 故先 gki 打底, 再叠加 mgk 与 oplus6895.
+          scripts/kconfig/merge_config.sh -m -O out \
+            arch/arm64/configs/gki_defconfig \
+            arch/arm64/configs/mgk_64_k510_defconfig \
+            kernel/configs/oplus6895.config
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          echo "==== 校验 cgroup 关键 config(应均为 =y) ===="
+          grep -E "CONFIG_CGROUPS|CONFIG_CGROUP_SCHED|CONFIG_CPUSETS|CONFIG_OPLUS_FEATURE_PERFORMANCE_SCHED" out/.config
 
       - name: Build kernel (no ABI verification)
         run: |
