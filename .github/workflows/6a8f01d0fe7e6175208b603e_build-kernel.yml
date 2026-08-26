@@ -138,9 +138,14 @@ jobs:
             arch/arm64/configs/gki_defconfig \
             arch/arm64/configs/mgk_64_k510_defconfig \
             kernel/configs/oplus6895.config
+          # oplus 显示驱动 oplus_display_temp_compensation.c 中函数
+          # oplus_temp_compensation_cmd_set 栈帧 ~8KB, 超过 mgk defconfig 的 3600 字节限制,
+          # -Werror 将 -Wframe-larger-than 升为 error 导致编译失败. 这里直接禁用栈帧大小警告
+          # (设为 0), 避免 oplus 其他厂商驱动也因类似问题中断编译.
+          scripts/config --file out/.config --set-val FRAME_WARN 0
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-          echo "==== 校验 cgroup 关键 config(应均为 =y) ===="
-          grep -E "CONFIG_CGROUPS|CONFIG_CGROUP_SCHED|CONFIG_CPUSETS|CONFIG_OPLUS_FEATURE_PERFORMANCE_SCHED" out/.config
+          echo "==== 校验关键 config(cgroup 应均为 =y, FRAME_WARN 应为 0) ===="
+          grep -E "CONFIG_CGROUPS|CONFIG_CGROUP_SCHED|CONFIG_CPUSETS|CONFIG_OPLUS_FEATURE_PERFORMANCE_SCHED|CONFIG_FRAME_WARN" out/.config
 
       - name: Build kernel (no ABI verification)
         run: |
