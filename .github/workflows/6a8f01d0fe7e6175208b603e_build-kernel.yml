@@ -116,11 +116,15 @@ jobs:
         run: |
           BRANCH="${{ inputs.branch }}"
           git clone --depth 1 -b "$BRANCH" "$VENDOR_REPO" /tmp/vendor_mt6895
-          # 内核树内触摸屏/指纹等驱动为符号链接, 指向内核树根的 vendor/, 需补齐否则配置阶段即失败
-          ln -sfn /tmp/vendor_mt6895/vendor kernel/vendor
-          echo "==== 校验符号链接解析 ===="
+          # 内核树内 30+ 个 oplus 软链(touchscreen/fingerprint/cpu/sensor/audio...)均以
+          # ../../vendor/... 形式指向"内核源码根的父目录下的 vendor/", 故 vendor 必须作为
+          # kernel 克隆目录的兄弟放在 $GITHUB_WORKSPACE/vendor, 而非塞进克隆目录内部,
+          # 否则所有软链悬空(init/Kconfig 在配置阶段即报 can't open .../oplus_cpu/sched/Kconfig)
+          ln -sfn /tmp/vendor_mt6895/vendor "$GITHUB_WORKSPACE/vendor"
+          echo "==== 校验关键软链解析(应指向 /tmp/vendor_mt6895/...) ===="
+          readlink -f kernel/kernel/oplus_cpu || true
           readlink -f kernel/drivers/input/touchscreen/oplus_touchscreen_v2 || true
-          ls -la kernel/vendor | head -n5
+          ls -la "$GITHUB_WORKSPACE/vendor/oplus/kernel" | head -n5
 
       - name: Generate kernel config
         run: |
