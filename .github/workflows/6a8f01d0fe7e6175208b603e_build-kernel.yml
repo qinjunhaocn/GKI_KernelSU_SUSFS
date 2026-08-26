@@ -1,0 +1,224 @@
+# 编译 OnePlus MT6895 内核 (oneplus/mt6895_v_15.0.0_ace 分支)
+# 手动触发；使用与官方 build.config 一致的 clang-r416183b (Clang 12.0.5)；不进行 ABI 校验
+# 放置位置: .github/workflows/build-kernel.yml
+name: 编译 MT6895 内核 (v_15.0.0_ace)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "内核分支（同时用于 vendor 仓库）"
+        required: false
+        default: "oneplus/mt6895_v_15.0.0_ace"
+
+permissions:
+  contents: read
+
+env:
+  KERNEL_REPO: https://github.com/OnePlusOSS/android_kernel_5.10_oneplus_mt6895.git
+  VENDOR_REPO: https://github.com/OnePlusOSS/android_vendor_mediatek_kernel_modules_mt6895.git
+  # 与仓库 build.config.common 引用一致: clang-r416183b = AOSP Clang 12.0.5
+  CLANG_SUBDIR: clang-r416183b
+  # ccache
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_COMPRESS: "1"
+  CCACHE_MAXSIZE: 2G
+
+concurrency:
+  group: mt6895-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout workflow 仓库
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Setup more Swap (for LTO)
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential ccache \
+            libssl-dev libelf-dev libncurses-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            zip unzip wget
+
+      # ── 工具链缓存 ── clang 体积大(约 1-2GB), 缓存后只在首次拉取
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ~/${{ env.CLANG_SUBDIR }}
+          key: clang-mt6895-${{ env.CLANG_SUBDIR }}
+
+      - name: Fetch official-matching Clang (clang-r416183b / Clang 12.0.5)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          TC_DIR="$HOME/$CLANG_SUBDIR"
+          mkdir -p "$TC_DIR"
+          ARCHIVE_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/${CLANG_SUBDIR}.tar.gz"
+          echo "::group::下载 Clang 工具链"
+          # 主源: googlesource 归档(仅取该子目录,无 git 历史); 备源: GitHub 镜像(tools 分支)
+          if wget -q --tries=3 --timeout=60 -O /tmp/clang.tar.gz "$ARCHIVE_URL" \
+             && tar -tzf /tmp/clang.tar.gz >/dev/null 2>&1; then
+            tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+            echo "从 googlesource 获取成功"
+          else
+            echo "googlesource 不可用, 回退到 GitHub 镜像 (tools 分支)"
+            git clone --depth 1 -b tools https://github.com/RyuujiX/android-kernel-tools.git /tmp/akt
+            cp -a "/tmp/akt/clang/host/linux-x86/${CLANG_SUBDIR}/." "$TC_DIR/"
+          fi
+          echo "::endgroup::"
+
+      - name: Add Clang to PATH
+        run: |
+          echo "$HOME/$CLANG_SUBDIR/bin" >> "$GITHUB_PATH"
+          "$HOME/$CLANG_SUBDIR/bin/clang" --version | head -n1
+
+      # ── ccache 缓存 ── 跨次构建复用, 加速重跑
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-mt6895-${{ inputs.branch }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-mt6895-${{ inputs.branch }}-
+
+      - name: Clone kernel source
+        run: |
+          BRANCH="${{ inputs.branch }}"
+          git clone --depth 1 -b "$BRANCH" "$KERNEL_REPO" kernel
+          echo "==== 当前内核提交 ===="
+          git -C kernel log -1 --oneline
+
+      - name: Clone vendor modules & wire symlinks
+        run: |
+          BRANCH="${{ inputs.branch }}"
+          git clone --depth 1 -b "$BRANCH" "$VENDOR_REPO" /tmp/vendor_mt6895
+          # 内核树内触摸屏/指纹等驱动为符号链接, 指向内核树根的 vendor/, 需补齐否则配置阶段即失败
+          ln -sfn /tmp/vendor_mt6895/vendor kernel/vendor
+          echo "==== 校验符号链接解析 ===="
+          readlink -f kernel/drivers/input/touchscreen/oplus_touchscreen_v2 || true
+          ls -la kernel/vendor | head -n5
+
+      - name: Generate kernel config
+        run: |
+          cd kernel
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 mgk_64_k510_defconfig oplus6895.config
+
+      - name: Build kernel (no ABI verification)
+        run: |
+          cd kernel
+          ccache -z
+          echo "==== 开始编译 (显式 Image dtbs modules 目标) ===="
+          # 与 build.config.mtk.aarch64 一致, 仅去掉 ABI_OUT_TAG/KMI_SYMBOL_LIST/
+          # GKI_MODULES_LIST/ABI_DEFINITION/SKIP_CP_KERNEL_HDR 等 ABI 校验变量
+          # 显式给出 Image/dtbs/modules 目标: 裸 make 只产 vmlinux/Image,
+          # dtb 与可加载模块需单独目标, 否则对应产物为空
+          set -o pipefail
+          make O=out ARCH=arm64 \
+            CC="ccache clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 \
+            Image dtbs modules 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          echo "==== ccache 统计 ===="
+          ccache -s
+
+      - name: Install modules (portable tree)
+        run: |
+          cd kernel
+          make O=out ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 \
+            INSTALL_MOD_PATH="$GITHUB_WORKSPACE/modules_install" \
+            INSTALL_MOD_STRIP=1 \
+            modules_install
+          # 删除指向源码/构建目录的悬空符号链接 source/build, 使模块包可移植
+          find "$GITHUB_WORKSPACE/modules_install/lib/modules" -maxdepth 2 \( -name source -o -name build \) -type l -delete
+          echo "==== 模块树 ===="
+          find "$GITHUB_WORKSPACE/modules_install" -name "*.ko" | head
+
+      - name: Verify build output
+        run: |
+          ls -lh kernel/out/arch/arm64/boot/Image || { echo "::error::Image 未生成"; exit 1; }
+          echo "==== dtb 数量 ===="
+          find kernel/out/arch/arm64/boot/dts -name "*.dtb" | wc -l
+          df -h | head -n3
+
+      # ── AnyKernel3 打包 ── 生成可直接刷入的可刷写 zip
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          # 基础配置: arm64 / 自动检测 boot 分区 / 兼容 A/B slot
+          sed -i \
+            -e 's|^kernel.string=.*|kernel.string=MT6895 v15.0.0_ace CI|' \
+            -e 's|^kernel.author=.*|kernel.author=OnePlusOSS CI Build|' \
+            -e 's|^arch=.*|arch=arm64|' \
+            -e 's|^block=.*|block=auto|' \
+            anykernel2.sh
+          # 放入内核镜像与 dtb(dtb 仅随包附带, 不自动 patch, 需机型定制)
+          cp "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image" ./Image
+          mkdir -p dtbs
+          cp "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dts/mediatek/"*.dtb dtbs/ 2>/dev/null || true
+          rm -rf .git .github 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE"
+          zip -r9 "AnyKernel3-MT6895-${{ github.run_id }}.zip" AnyKernel3 -x "*.git*" "*/.github*"
+          ls -lh "AnyKernel3-MT6895-${{ github.run_id }}.zip"
+
+      # ── 失败诊断 ── 无论成功失败都上传构建日志与 .config, 便于排查(尤其 Clang12 vs 新源码)
+      - name: Upload build log & .config (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-debug-${{ github.run_id }}
+          path: |
+            ${{ github.workspace }}/build.log
+            kernel/out/.config
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload boot artifacts (Image & dtbs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-boot-${{ github.run_id }}
+          path: kernel/out/arch/arm64/boot/
+          if-no-files-found: error
+
+      - name: Upload module tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-modules-${{ github.run_id }}
+          path: ${{ github.workspace }}/modules_install/
+          if-no-files-found: warn
+
+      - name: Upload AnyKernel3 flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-MT6895-${{ github.run_id }}
+          path: ${{ github.workspace }}/AnyKernel3-MT6895-${{ github.run_id }}.zip
+          if-no-files-found: error
