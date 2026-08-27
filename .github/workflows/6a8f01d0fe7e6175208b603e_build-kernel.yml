@@ -121,10 +121,23 @@ jobs:
           # kernel 克隆目录的兄弟放在 $GITHUB_WORKSPACE/vendor, 而非塞进克隆目录内部,
           # 否则所有软链悬空(init/Kconfig 在配置阶段即报 can't open .../oplus_cpu/sched/Kconfig)
           ln -sfn /tmp/vendor_mt6895/vendor "$GITHUB_WORKSPACE/vendor"
-          echo "==== 校验关键软链解析(应指向 /tmp/vendor_mt6895/...) ===="
+          # vendor 驱动头文件用 #include "../../../../kernel-5.10/drivers/..." 回引内核源码.
+          # 在 AOSP 原生构建树里内核源码目录叫 kernel-5.10/, 我们的克隆叫 kernel/, 路径不匹配.
+          # 注意: Clang 解析 #include "..." 相对路径时基于文件的真实路径(跟随软链), 而非内核树
+          # 内的软链路径. vendor 文件的真实路径在 /tmp/vendor_mt6895/vendor/oplus/kernel/...,
+          # 故 kernel-5.10 软链必须建在 vendor 目录树里(用绝对路径, 因 vendor 与 kernel 在不同
+          # 目录树):
+          #   vendor/oplus/kernel-5.10 -> $GITHUB_WORKSPACE/kernel  (4 层 include, 从 charger/ 回到 oplus/)
+          #   vendor/kernel-5.10       -> $GITHUB_WORKSPACE/kernel  (5 层 include, 从 system/ 回到 vendor/)
+          ln -sfn "$GITHUB_WORKSPACE/kernel" "$GITHUB_WORKSPACE/vendor/oplus/kernel-5.10"
+          ln -sfn "$GITHUB_WORKSPACE/kernel" "$GITHUB_WORKSPACE/vendor/kernel-5.10"
+          echo "==== 校验软链解析 ===="
           readlink -f kernel/kernel/oplus_cpu || true
           readlink -f kernel/drivers/input/touchscreen/oplus_touchscreen_v2 || true
-          ls -la "$GITHUB_WORKSPACE/vendor/oplus/kernel" | head -n5
+          echo "kernel-5.10 软链:"
+          ls -la "$GITHUB_WORKSPACE/vendor/oplus/kernel-5.10" "$GITHUB_WORKSPACE/vendor/kernel-5.10"
+          echo "校验 charger_class.h 可达性(通过 vendor 真实路径):"
+          ls -la "$GITHUB_WORKSPACE/vendor/oplus/kernel-5.10/drivers/power/supply/charger_class.h" || true
 
       - name: Generate kernel config
         run: |
